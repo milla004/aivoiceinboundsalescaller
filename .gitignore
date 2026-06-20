@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# env / secrets — NEVER commit real keys
+.env
+.env.*
+!.env.example
+
+# next.js
+dashboard/.next/
+dashboard/out/
+dashboard/build/
+
+# misc
+.DS_Store
+*.log
+.vercel
+*.tsbuildinfo
+next-env.d.ts
