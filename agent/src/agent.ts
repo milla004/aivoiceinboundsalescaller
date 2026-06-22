@@ -62,17 +62,18 @@ export default defineAgent({
     });
     if (callId && contactId) await db.linkCallContact(callId, contactId);
 
+    const greeting =
+      profile?.greeting ||
+      'Thanks for calling. This call may be recorded for quality, and you are speaking with an automated assistant. Who do I have the pleasure of speaking with today?';
+
     // -- Build the system prompt ----------------------------------------------
     const systemPrompt = buildSystemPrompt({
       personaPrompt: profile?.system_prompt ?? 'You are a warm, professional inbound sales agent named Sarah.',
       productName: (campaign?.product_name as string) || profile?.name || 'our wellness product',
       discountCode: (campaign?.discount_code as string) ?? null,
       faq: Array.isArray(profile?.faq) ? profile.faq : [],
+      greeting,
     });
-
-    const greeting =
-      profile?.greeting ||
-      'Thanks for calling. This call may be recorded for quality, and you are speaking with an automated assistant. Who do I have the pleasure of speaking with today?';
 
     const voiceName = profile?.voice || 'Puck';
 
@@ -282,13 +283,13 @@ export default defineAgent({
     await session.start({ agent, room: ctx.room });
     console.log(`[agent] session started (voice=${voiceName}, sandbox=${isSandbox()})`);
 
-    // Greet the caller. With a speech-to-speech RealtimeModel there is no TTS
-    // engine, so session.say() (text->TTS) is unavailable. Instead we ask the
-    // realtime model to generate the greeting itself. The greeting carries a
-    // compliance disclosure, so we instruct it to speak the wording verbatim.
-    await session.generateReply({
-      instructions: `Begin the call by saying the following greeting exactly, word for word, then stop and wait for the caller to respond:\n\n"${greeting}"`,
-    });
+    // NOTE: gemini-3.1-flash-live-preview cannot be prompted to speak first —
+    // the Google plugin blocks generateReply() for 3.1 models (it requires
+    // midSessionChatCtxUpdate, which 3.1 lacks), and session.say() needs a TTS
+    // plugin we don't use with a speech-to-speech model. So the greeting is
+    // injected into the system prompt instead (see buildSystemPrompt): the model
+    // opens its FIRST reply with the verbatim disclosure as soon as the caller
+    // speaks. Nothing to call here.
 
     // -- On shutdown, finalize the call row -----------------------------------
     ctx.addShutdownCallback(async () => {

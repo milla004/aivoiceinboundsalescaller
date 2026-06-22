@@ -12,6 +12,13 @@ export interface PromptParts {
   productName?: string;
   discountCode?: string | null;
   faq?: FaqItem[];
+  /**
+   * Opening line incl. consent + bot disclosure. The gemini-3.1 realtime model
+   * cannot be made to speak first (the plugin blocks generateReply for 3.1), so
+   * we instruct the model to OPEN its very first reply with this verbatim, the
+   * moment the caller speaks. Keeps the compliance disclosure on every call.
+   */
+  greeting?: string;
 }
 
 // Caleb's 10-step inbound sales process, encoded as instructions the model
@@ -61,6 +68,17 @@ export function buildSystemPrompt(parts: PromptParts): string {
   const sections: string[] = [];
 
   sections.push(parts.personaPrompt?.trim() || 'You are a warm, professional inbound sales agent.');
+
+  if (parts.greeting?.trim()) {
+    sections.push(
+      `OPENING — CRITICAL: You cannot speak before the caller. The instant the ` +
+      `caller says anything (even just "hello"), your FIRST response must begin ` +
+      `with this greeting, spoken verbatim, word for word, before anything else:\n\n` +
+      `"${parts.greeting.trim()}"\n\n` +
+      `Do not skip it, paraphrase it, or merge it into later conversation. Say it ` +
+      `first, then continue naturally.`
+    );
+  }
 
   if (parts.productName) {
     sections.push(`PRODUCT: You are selling "${parts.productName}".`);
