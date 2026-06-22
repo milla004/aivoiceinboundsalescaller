@@ -282,8 +282,13 @@ export default defineAgent({
     await session.start({ agent, room: ctx.room });
     console.log(`[agent] session started (voice=${voiceName}, sandbox=${isSandbox()})`);
 
-    // Greet the caller.
-    await session.say(greeting);
+    // Greet the caller. With a speech-to-speech RealtimeModel there is no TTS
+    // engine, so session.say() (text->TTS) is unavailable. Instead we ask the
+    // realtime model to generate the greeting itself. The greeting carries a
+    // compliance disclosure, so we instruct it to speak the wording verbatim.
+    await session.generateReply({
+      instructions: `Begin the call by saying the following greeting exactly, word for word, then stop and wait for the caller to respond:\n\n"${greeting}"`,
+    });
 
     // -- On shutdown, finalize the call row -----------------------------------
     ctx.addShutdownCallback(async () => {
