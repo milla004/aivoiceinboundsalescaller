@@ -13,7 +13,7 @@ import {
   llm,
 } from '@livekit/agents';
 import * as google from '@livekit/agents-plugin-google';
-import { EndSensitivity, StartSensitivity } from '@google/genai';
+import { EndSensitivity, StartSensitivity, ThinkingLevel } from '@google/genai';
 import { z } from 'zod';
 import { fileURLToPath } from 'node:url';
 
@@ -21,7 +21,17 @@ import { config } from './config.js';
 import { buildSystemPrompt } from './prompt.js';
 import { checkClaim } from './compliance.js';
 import { getPaymentProvider, isSandbox } from './payment.js';
+import { getGreetingAudio } from './greeting-audio.js';
 import * as db from './db.js';
+
+// Map the dashboard's thinking-level string to the genai enum.
+// 'minimal' = "No thinking" in the UI.
+const THINKING_LEVELS: Record<string, ThinkingLevel> = {
+  minimal: ThinkingLevel.MINIMAL,
+  low: ThinkingLevel.LOW,
+  medium: ThinkingLevel.MEDIUM,
+  high: ThinkingLevel.HIGH,
+};
 
 export default defineAgent({
   entry: async (ctx: JobContext) => {
@@ -72,10 +82,11 @@ export default defineAgent({
       productName: (campaign?.product_name as string) || profile?.name || 'our wellness product',
       discountCode: (campaign?.discount_code as string) ?? null,
       faq: Array.isArray(profile?.faq) ? profile.faq : [],
-      greeting,
     });
 
     const voiceName = profile?.voice || 'Puck';
+    const thinkingLevel =
+      THINKING_LEVELS[(profile?.thinking_level as string) ?? 'low'] ?? ThinkingLevel.LOW;
 
     // -- Track which Caleb step we've reached (for funnel analytics) ----------
     let reachedStep = 1;
@@ -240,6 +251,8 @@ export default defineAgent({
       model: config.geminiModel,
       voice: voiceName,
       instructions: systemPrompt,
+      // Gemini 3.1 live uses thinkingLevel (2.5 would use thinkingBudget).
+      thinkingConfig: { thinkingLevel },
       contextWindowCompression: {
         triggerTokens: '25600',
         slidingWindow: { targetTokens: '12800' },
@@ -283,13 +296,24 @@ export default defineAgent({
     await session.start({ agent, room: ctx.room });
     console.log(`[agent] session started (voice=${voiceName}, sandbox=${isSandbox()})`);
 
-    // NOTE: gemini-3.1-flash-live-preview cannot be prompted to speak first —
-    // the Google plugin blocks generateReply() for 3.1 models (it requires
-    // midSessionChatCtxUpdate, which 3.1 lacks), and session.say() needs a TTS
-    // plugin we don't use with a speech-to-speech model. So the greeting is
-    // injected into the system prompt instead (see buildSystemPrompt): the model
-    // opens its FIRST reply with the verbatim disclosure as soon as the caller
-    // speaks. Nothing to call here.
+    // Greet the caller immediately on connect. gemini-3.1 cannot speak before
+    // the caller, so we play a pre-rendered greeting (synthesized once in the
+    // SAME selected voice, then cached) the moment the call connects. This
+    // removes the opening dead air and guarantees the compliance disclosure is
+    // delivered on every call. say({ audio }) plays pre-rendered audio without
+    // needing a TTS plugin; the framework resamples to the room rate.
+    const greetingAudio = await getGreetingAudio(voiceName, greeting);
+    if (greetingAudio) {
+      await session.say(greeting, { audio: greetingAudio }).waitForPlayout();
+    } else {
+      // Fallback: pre-rendered audio unavailable (e.g. TTS error). Ask the model
+      // to open with the greeting verbatim. (Ignored on gemini-3.1, which blocks
+      // generateReply, but functional if the model is switched to 2.5.)
+      console.warn('[agent] greeting audio unavailable; falling back to model greeting');
+      await session.generateReply({
+        instructions: `Begin the call by saying the following greeting exactly, word for word, then stop and wait for the caller to respond:\n\n"${greeting}"`,
+      });
+    }
 
     // -- On shutdown, finalize the call row -----------------------------------
     ctx.addShutdownCallback(async () => {

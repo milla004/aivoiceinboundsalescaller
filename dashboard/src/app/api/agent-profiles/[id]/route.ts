@@ -7,6 +7,7 @@ const PatchSchema = z.object({
   name: z.string().min(1).optional(),
   system_prompt: z.string().optional(),
   voice: z.string().optional(),
+  thinking_level: z.enum(["minimal", "low", "medium", "high"]).optional(),
   greeting: z.string().optional(),
   faq: z.array(z.object({ q: z.string(), a: z.string() })).optional(),
 });

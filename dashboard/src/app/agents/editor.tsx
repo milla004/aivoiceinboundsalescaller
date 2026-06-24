@@ -4,8 +4,22 @@ import { useState } from "react";
 import type { AgentProfile, FaqItem } from "@/lib/types";
 import { Card, Badge } from "@/components/ui";
 
-// Gemini Live preset voices (the limited set — this is the tradeoff you accepted).
-const GEMINI_VOICES = ["Puck", "Charon", "Kore", "Fenrir", "Aoede"];
+// All 30 Gemini Live named voices (the full set the realtime model supports).
+const GEMINI_VOICES = [
+  "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
+  "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
+  "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar",
+  "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi",
+  "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
+];
+
+// Gemini 3.1 thinking levels. 'minimal' is shown as "No thinking".
+const THINKING_LEVELS: { value: "minimal" | "low" | "medium" | "high"; label: string }[] = [
+  { value: "minimal", label: "No thinking" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
 
 export function AgentEditor({ profiles }: { profiles: AgentProfile[] }) {
   const [selectedId, setSelectedId] = useState(profiles[0]?.id ?? "");
@@ -37,6 +51,7 @@ export function AgentEditor({ profiles }: { profiles: AgentProfile[] }) {
           name: draft.name,
           system_prompt: draft.system_prompt,
           voice: draft.voice,
+          thinking_level: draft.thinking_level,
           greeting: draft.greeting,
           faq: draft.faq,
         }),
@@ -83,7 +98,7 @@ export function AgentEditor({ profiles }: { profiles: AgentProfile[] }) {
             />
           </Field>
 
-          <Field label="Voice" hint="Gemini Live preset voices">
+          <Field label="Voice" hint="Gemini Live voice — the greeting is also synthesized in this voice">
             <div className="flex flex-wrap gap-2">
               {GEMINI_VOICES.map((v) => (
                 <button
@@ -94,6 +109,22 @@ export function AgentEditor({ profiles }: { profiles: AgentProfile[] }) {
                   }`}
                 >
                   {v}
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="Thinking level" hint="How much the model reasons before replying. Higher = smarter but slower to respond.">
+            <div className="flex flex-wrap gap-2">
+              {THINKING_LEVELS.map((t) => (
+                <button
+                  key={t.value}
+                  onClick={() => update("thinking_level", t.value)}
+                  className={`rounded-full px-3 py-1 text-sm border ${
+                    draft.thinking_level === t.value ? "border-blue-500 bg-blue-50 text-blue-700" : "border-neutral-200 text-neutral-600 hover:bg-neutral-50"
+                  }`}
+                >
+                  {t.label}
                 </button>
               ))}
             </div>

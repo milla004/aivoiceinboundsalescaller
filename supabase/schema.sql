@@ -48,8 +48,10 @@ create table if not exists agent_profiles (
   name            text not null,                       -- e.g. "Priya - warm closer"
   -- The full editable system prompt typed in the website UI (Step 2 requirement).
   system_prompt   text not null default '',
-  -- Gemini Live voice id (e.g. 'Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede').
+  -- Gemini Live voice id (any of the 30 named voices, e.g. 'Puck', 'Kore', 'Zephyr').
   voice           text not null default 'Puck',
+  -- Gemini 3.1 thinking level: 'minimal' (no thinking) | 'low' | 'medium' | 'high'.
+  thinking_level  text not null default 'low',
   -- Opening line incl. consent + bot disclosure (configurable per market/state).
   greeting        text not null default '',
   -- Verbatim FAQ knowledge base the agent must not deviate from (JSON array of {q,a}).

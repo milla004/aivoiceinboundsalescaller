@@ -20,11 +20,14 @@ export interface FaqItem {
   a: string;
 }
 
+export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
+
 export interface AgentProfile {
   id: string;
   name: string;
   system_prompt: string;
   voice: string;
+  thinking_level: ThinkingLevel;
   greeting: string;
   faq: FaqItem[];
   compliance_ruleset: string;
