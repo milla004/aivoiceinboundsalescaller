@@ -22,6 +22,7 @@ import { buildSystemPrompt } from './prompt.js';
 import { checkClaim } from './compliance.js';
 import { getPaymentProvider, isSandbox } from './payment.js';
 import { getGreetingAudio } from './greeting-audio.js';
+import { embedText } from './embeddings.js';
 import * as db from './db.js';
 
 // Map the dashboard's thinking-level string to the genai enum.
@@ -235,6 +236,30 @@ export default defineAgent({
           // NOTE: actual SIP transfer is wired in deployment (Phase 5). For now we
           // acknowledge and the agent should let the caller know.
           return 'Let the caller know you are connecting them to a team member who can help.';
+        },
+      }),
+
+      search_knowledge: llm.tool({
+        description:
+          'Look up factual product/company knowledge before answering a caller question ' +
+          'about ingredients, dosing, the offer, shipping, returns, the company, or anything ' +
+          'you are not certain about. Returns relevant reference snippets. Answer ONLY from ' +
+          'what is returned; if nothing relevant comes back, say you are not sure rather than guessing.',
+        parameters: z.object({
+          query: z.string().describe('The caller\'s question, in your own words, to search for.'),
+        }),
+        execute: async ({ query }) => {
+          if (!profile?.id) return 'No knowledge base is available for this agent.';
+          const queryEmbedding = await embedText(query, 'RETRIEVAL_QUERY');
+          if (!queryEmbedding) return 'Knowledge lookup is temporarily unavailable.';
+          const matches = await db.searchKnowledge(profile.id, queryEmbedding, 4);
+          if (!matches.length) {
+            return 'No relevant information was found. Tell the caller you are not certain and offer to connect them to a team member if needed.';
+          }
+          const refs = matches
+            .map((m, i) => `[${i + 1}] ${m.title ? m.title + ': ' : ''}${m.content}`)
+            .join('\n\n');
+          return `Reference information (answer only from this):\n\n${refs}`;
         },
       }),
     };

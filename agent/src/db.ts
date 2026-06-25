@@ -211,3 +211,34 @@ export async function markClient(contactId: string | null) {
   if (!c || !contactId) return;
   await c.from('contacts').update({ type: 'client' }).eq('id', contactId);
 }
+
+export interface KnowledgeMatch {
+  id: string;
+  title: string;
+  content: string;
+  similarity: number;
+}
+
+/**
+ * Semantic search over a profile's knowledge base (RAG). Calls the
+ * match_knowledge() Postgres function with a query embedding. Returns [] when
+ * Supabase isn't configured, there's no profile, or nothing matches.
+ */
+export async function searchKnowledge(
+  profileId: string | null,
+  queryEmbedding: number[],
+  matchCount = 4,
+): Promise<KnowledgeMatch[]> {
+  const c = db();
+  if (!c || !profileId || !queryEmbedding?.length) return [];
+  const { data, error } = await c.rpc('match_knowledge', {
+    query_embedding: queryEmbedding,
+    profile_id: profileId,
+    match_count: matchCount,
+  });
+  if (error) {
+    console.error('[db] searchKnowledge failed', error);
+    return [];
+  }
+  return (data ?? []) as KnowledgeMatch[];
+}

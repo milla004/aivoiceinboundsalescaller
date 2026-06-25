@@ -10,6 +10,8 @@
 -- ---- Extensions ------------------------------------------------------------
 create extension if not exists "uuid-ossp";
 create extension if not exists "pgcrypto";
+-- pgvector: powers the RAG knowledge base (semantic search of agent knowledge).
+create extension if not exists "vector";
 
 -- ---- Enums -----------------------------------------------------------------
 do $$ begin
@@ -260,3 +262,59 @@ select 'Global Default', 'Puck', true,
   'Thanks for calling. This call may be recorded for quality, and you are speaking with an automated assistant. Who do I have the pleasure of speaking with today?',
   'You are a warm, professional inbound sales agent. Follow the 10-step process. Never make disease/cure claims.'
 where not exists (select 1 from agent_profiles where is_default = true);
+
+-- =============================================================================
+-- knowledge_documents — RAG knowledge base (pgvector). Each row is one chunk of
+-- source text plus its embedding. Scoped per agent profile so different personas
+-- can have different knowledge. The agent embeds the caller's question at runtime
+-- and retrieves the closest chunks via match_knowledge() below.
+--
+-- Embeddings: Google gemini-embedding-001 @ 768 dims (set outputDimensionality
+-- to 768 when embedding). If you change the dimension, change vector(768) too.
+-- =============================================================================
+create table if not exists knowledge_documents (
+  id               uuid primary key default uuid_generate_v4(),
+  agent_profile_id uuid references agent_profiles(id) on delete cascade,
+  -- Groups all chunks that came from one ingested document (one paste), so the
+  -- UI can list/delete a document as a unit.
+  source_id        uuid not null default uuid_generate_v4(),
+  -- A human label for the source (e.g. "Ingredient sheet", "Return policy").
+  title            text not null default '',
+  -- The chunk text the agent will read back from.
+  content          text not null,
+  -- Ordering within a source document, for stable display/dedup.
+  chunk_index      int not null default 0,
+  embedding        vector(768),
+  created_at       timestamptz not null default now()
+);
+create index if not exists knowledge_profile_idx on knowledge_documents (agent_profile_id);
+create index if not exists knowledge_source_idx on knowledge_documents (source_id);
+-- IVFFlat cosine index for fast approximate nearest-neighbour search.
+create index if not exists knowledge_embedding_idx
+  on knowledge_documents using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+
+-- Retrieve the top-k most similar knowledge chunks for a profile.
+-- Returns similarity in [0,1] (1 = identical direction). The agent passes a
+-- query embedding generated with task type RETRIEVAL_QUERY.
+create or replace function match_knowledge(
+  query_embedding vector(768),
+  profile_id uuid,
+  match_count int default 4,
+  min_similarity float default 0.3
+)
+returns table (id uuid, title text, content text, similarity float)
+language sql stable
+as $$
+  select
+    k.id,
+    k.title,
+    k.content,
+    1 - (k.embedding <=> query_embedding) as similarity
+  from knowledge_documents k
+  where k.agent_profile_id = profile_id
+    and k.embedding is not null
+    and 1 - (k.embedding <=> query_embedding) >= min_similarity
+  order by k.embedding <=> query_embedding
+  limit match_count
+$$;
+

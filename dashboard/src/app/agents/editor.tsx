@@ -1,8 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import type { AgentProfile, FaqItem } from "@/lib/types";
 import { Card, Badge } from "@/components/ui";
+
+interface KnowledgeDoc {
+  source_id: string;
+  title: string;
+  chunks: number;
+  chars: number;
+  created_at: string;
+}
 
 // All 30 Gemini Live named voices (the full set the realtime model supports).
 const GEMINI_VOICES = [
@@ -150,6 +158,13 @@ export function AgentEditor({ profiles }: { profiles: AgentProfile[] }) {
             <FaqEditor faq={faq} onChange={(f) => update("faq", f)} />
           </Field>
 
+          <Field
+            label="Knowledge base (RAG)"
+            hint="Paste longer reference material (ingredients, policies, company info). The agent searches this during calls instead of you cramming it into the prompt."
+          >
+            <KnowledgeManager profileId={draft.id} />
+          </Field>
+
           <div className="flex items-center gap-3 pt-2 border-t border-neutral-100">
             <button
               onClick={save}
@@ -216,3 +231,124 @@ function FaqEditor({ faq, onChange }: { faq: FaqItem[]; onChange: (f: FaqItem[])
     </div>
   );
 }
+
+function KnowledgeManager({ profileId }: { profileId: string }) {
+  const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/knowledge?agent_profile_id=${profileId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setDocs(data.documents ?? []);
+      }
+    } catch {
+      /* non-fatal */
+    } finally {
+      setLoading(false);
+    }
+  }, [profileId]);
+
+  // Reload whenever the selected profile changes.
+  useEffect(() => {
+    setTitle("");
+    setContent("");
+    setMsg(null);
+    void load();
+  }, [load]);
+
+  async function add() {
+    if (!content.trim()) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/knowledge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent_profile_id: profileId, title, content }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Ingest failed");
+      setMsg(`Added "${title || "(untitled)"}" — ${data.chunks} chunk(s).`);
+      setTitle("");
+      setContent("");
+      await load();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Ingest failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(sourceId: string) {
+    setMsg(null);
+    try {
+      const res = await fetch(`/api/knowledge/${sourceId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error((await res.json()).error ?? "Delete failed");
+      await load();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Delete failed");
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Existing documents */}
+      {loading ? (
+        <p className="text-xs text-neutral-400">Loading…</p>
+      ) : docs.length === 0 ? (
+        <p className="text-xs text-neutral-400">No knowledge added yet.</p>
+      ) : (
+        <ul className="divide-y divide-neutral-100 border border-neutral-200 rounded-md">
+          {docs.map((d) => (
+            <li key={d.source_id} className="flex items-center justify-between px-3 py-2 text-sm">
+              <span className="text-neutral-700">
+                {d.title}
+                <span className="ml-2 text-xs text-neutral-400">
+                  {d.chunks} chunk{d.chunks === 1 ? "" : "s"} · {d.chars.toLocaleString()} chars
+                </span>
+              </span>
+              <button
+                onClick={() => remove(d.source_id)}
+                className="text-neutral-400 hover:text-red-500 text-xs px-2 py-1"
+              >
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Add new */}
+      <input
+        className="input"
+        placeholder="Document title (e.g. Ingredient sheet)"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+      />
+      <textarea
+        className="input min-h-32"
+        placeholder="Paste reference text here. It will be chunked and embedded for semantic search."
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+      />
+      <div className="flex items-center gap-3">
+        <button
+          onClick={add}
+          disabled={busy || !content.trim()}
+          className="rounded-md bg-neutral-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-neutral-900 disabled:opacity-50"
+        >
+          {busy ? "Adding…" : "Add to knowledge base"}
+        </button>
+        {msg && <span className="text-xs text-neutral-500">{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
