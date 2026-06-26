@@ -230,6 +230,7 @@ function VoicePicker({
   // Which voice is currently loading/playing a preview.
   const [playing, setPlaying] = useState<string | null>(null);
   const [audio, setAudio] = useState<HTMLAudioElement | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
   async function preview(v: string) {
     // Stop anything already playing.
@@ -237,19 +238,39 @@ function VoicePicker({
       audio.pause();
       setAudio(null);
     }
+    setErr(null);
     setPlaying(v);
     try {
-      const el = new Audio(`/api/voice-sample?voice=${encodeURIComponent(v)}`);
+      const res = await fetch(`/api/voice-sample?voice=${encodeURIComponent(v)}`);
+      const type = res.headers.get("content-type") ?? "";
+      if (!res.ok || !type.includes("audio")) {
+        // Surface the real server error instead of failing silently.
+        let msg = `Preview failed (${res.status})`;
+        try {
+          const body = await res.json();
+          if (body?.error) msg = body.error;
+        } catch { /* not json */ }
+        setErr(msg);
+        setPlaying(null);
+        return;
+      }
+      const blob = await res.blob();
+      const el = new Audio(URL.createObjectURL(blob));
       el.onended = () => setPlaying(null);
-      el.onerror = () => setPlaying(null);
+      el.onerror = () => {
+        setErr("Browser could not play the audio.");
+        setPlaying(null);
+      };
       setAudio(el);
       await el.play();
-    } catch {
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Preview failed");
       setPlaying(null);
     }
   }
 
   return (
+    <div>
     <div className="flex flex-wrap gap-2">
       {GEMINI_VOICES.map((v) => {
         const isSelected = selected === v;
@@ -278,6 +299,8 @@ function VoicePicker({
           </span>
         );
       })}
+    </div>
+    {err && <p className="text-xs text-red-500 mt-2">{err}</p>}
     </div>
   );
 }

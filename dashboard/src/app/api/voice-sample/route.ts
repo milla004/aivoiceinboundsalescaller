@@ -47,9 +47,9 @@ function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
   return Buffer.concat([header, pcm]);
 }
 
-async function synthesize(voice: string): Promise<Buffer | null> {
+async function synthesize(voice: string): Promise<{ pcm?: Buffer; error?: string }> {
   const apiKey = process.env.GOOGLE_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) return { error: "GOOGLE_API_KEY not set on the dashboard." };
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${apiKey}`;
   const body = {
@@ -62,17 +62,29 @@ async function synthesize(voice: string): Promise<Buffer | null> {
     },
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) return null;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    return { error: `Network error reaching Gemini: ${e instanceof Error ? e.message : e}` };
+  }
+
+  if (!res.ok) {
+    const detail = await res.text();
+    // Surface the upstream status + message so the cause is visible.
+    return { error: `Gemini TTS ${res.status}: ${detail.slice(0, 400)}` };
+  }
+
   const data = (await res.json()) as {
     candidates?: { content?: { parts?: { inlineData?: { data?: string } }[] } }[];
   };
   const b64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  return b64 ? Buffer.from(b64, "base64") : null;
+  if (!b64) return { error: "Gemini returned no audio data (check the model supports AUDIO output)." };
+  return { pcm: Buffer.from(b64, "base64") };
 }
 
 export async function GET(req: Request) {
@@ -98,11 +110,11 @@ export async function GET(req: Request) {
     // miss — synthesize below
   }
 
-  const pcm = await synthesize(voice);
-  if (!pcm) {
-    return Response.json({ error: "Synthesis failed" }, { status: 502 });
+  const result = await synthesize(voice);
+  if (result.error || !result.pcm) {
+    return Response.json({ error: result.error ?? "Synthesis failed" }, { status: 502 });
   }
-  const wav = pcmToWav(pcm, SAMPLE_RATE);
+  const wav = pcmToWav(result.pcm, SAMPLE_RATE);
 
   try {
     await mkdir(CACHE_DIR, { recursive: true });
