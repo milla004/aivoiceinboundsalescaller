@@ -65,7 +65,26 @@ async function synthesizeLive(voice: string): Promise<{ pcm?: Buffer; error?: st
 
   try {
     const done = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Live session timed out")), TURN_TIMEOUT_MS);
+      let settled = false;
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      const hardTimer = setTimeout(() => finish(new Error("Live session timed out")), TURN_TIMEOUT_MS);
+
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(hardTimer);
+        if (idleTimer) clearTimeout(idleTimer);
+        if (err) reject(err);
+        else resolve();
+      };
+
+      // If audio has arrived but the model never sends turn/generationComplete
+      // (it can sit "waiting for input"), finalize shortly after the last chunk.
+      const bumpIdle = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => finish(), 1500);
+      };
+
       ai.live
         .connect({
           model: LIVE_MODEL,
@@ -88,29 +107,39 @@ async function synthesizeLive(voice: string): Promise<{ pcm?: Buffer; error?: st
             },
             onmessage: (msg: LiveServerMessage) => {
               const b64 = msg.data;
-              if (b64) chunks.push(Buffer.from(b64, "base64"));
-              if (msg.serverContent?.turnComplete) {
-                clearTimeout(timer);
-                resolve();
+              if (b64) {
+                chunks.push(Buffer.from(b64, "base64"));
+                bumpIdle();
+              }
+              // Resolve on either completion signal.
+              if (msg.serverContent?.turnComplete || msg.serverContent?.generationComplete) {
+                finish();
               }
             },
             onerror: (e: ErrorEvent) => {
-              clearTimeout(timer);
-              reject(new Error(e.message || "Live session error"));
+              finish(new Error(e.message || "Live session error"));
             },
             onclose: () => {
-              clearTimeout(timer);
-              resolve();
+              finish();
             },
           },
         })
         .then((s) => {
           session = s;
         })
-        .catch(reject);
+        .catch(finish);
     });
 
-    await done;
+    try {
+      await done;
+    } catch (e) {
+      // If the hard timeout fired but we still captured audio, use it rather
+      // than failing — the completion signal just never arrived.
+      if (!chunks.length) {
+        try { (session as Session | null)?.close(); } catch { /* ignore */ }
+        return { error: e instanceof Error ? e.message : "Live synthesis failed" };
+      }
+    }
     (session as Session | null)?.close();
 
     if (!chunks.length) return { error: "Live model returned no audio." };
