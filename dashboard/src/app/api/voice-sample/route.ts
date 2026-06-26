@@ -2,18 +2,22 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { GoogleGenAI, Modality, type LiveServerMessage, type Session } from "@google/genai";
 
 // GET /api/voice-sample?voice=Puck
-// Synthesizes a short sample line in the requested voice via Gemini TTS,
-// wraps the raw PCM in a WAV header, caches it to disk, and serves audio/wav
-// so the browser can play it. Lets you preview a voice before selecting it.
+// Plays a short sample synthesized by the SAME live model used on calls
+// (gemini-3.1-flash-live-preview by default, overridable via GEMINI_MODEL), so
+// the preview matches what the caller will actually hear. We open a Live API
+// session, send a user turn instructing the model to read the sample line
+// verbatim (this sidesteps the model's "cannot speak first" limitation),
+// collect the streamed PCM, wrap it in a WAV header, and cache per voice+model.
 
-const TTS_MODEL = "gemini-2.5-flash-preview-tts";
-const SAMPLE_RATE = 24000; // Gemini TTS native rate
-const SAMPLE_LINE =
-  "Hi there, thanks for calling. This is how I'll sound on your calls.";
+// Live audio output is signed 16-bit PCM, mono, 24 kHz.
+const SAMPLE_RATE = 24000;
+const SAMPLE_LINE = "Hi there, thanks for calling. This is how I'll sound on your calls.";
+const LIVE_MODEL = process.env.GEMINI_MODEL || "gemini-3.1-flash-live-preview";
+const TURN_TIMEOUT_MS = 15000;
 
-// Allowed voices — keep in sync with the editor's voice list.
 const VOICES = new Set([
   "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
   "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
@@ -24,7 +28,6 @@ const VOICES = new Set([
 
 const CACHE_DIR = join(tmpdir(), "voice-sample-cache");
 
-/** Wrap raw mono 16-bit PCM in a minimal WAV (RIFF) header. */
 function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
   const channels = 1;
   const bitsPerSample = 16;
@@ -35,8 +38,8 @@ function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
   header.writeUInt32LE(36 + pcm.length, 4);
   header.write("WAVE", 8);
   header.write("fmt ", 12);
-  header.writeUInt32LE(16, 16); // PCM chunk size
-  header.writeUInt16LE(1, 20); // audio format = PCM
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
   header.writeUInt16LE(channels, 22);
   header.writeUInt32LE(sampleRate, 24);
   header.writeUInt32LE(byteRate, 28);
@@ -47,44 +50,75 @@ function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
   return Buffer.concat([header, pcm]);
 }
 
-async function synthesize(voice: string): Promise<{ pcm?: Buffer; error?: string }> {
+/**
+ * Synthesize the sample line via a Live API session in `voice`. Collects the
+ * streamed PCM chunks until the turn completes (or times out). Returns the raw
+ * PCM bytes, or an error message.
+ */
+async function synthesizeLive(voice: string): Promise<{ pcm?: Buffer; error?: string }> {
   const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) return { error: "GOOGLE_API_KEY not set on the dashboard." };
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${apiKey}`;
-  const body = {
-    contents: [{ parts: [{ text: SAMPLE_LINE }] }],
-    generationConfig: {
-      responseModalities: ["AUDIO"],
-      speechConfig: {
-        voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } },
-      },
-    },
-  };
+  const ai = new GoogleGenAI({ apiKey });
+  const chunks: Buffer[] = [];
+  let session: Session | null = null;
 
-  let res: Response;
   try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+    const done = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Live session timed out")), TURN_TIMEOUT_MS);
+      ai.live
+        .connect({
+          model: LIVE_MODEL,
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } },
+            },
+            systemInstruction:
+              "You are a voice sample generator. When asked, read the provided line exactly, " +
+              "once, in a warm natural tone. Do not add anything else.",
+          },
+          callbacks: {
+            onopen: () => {
+              // Send a user turn so the model responds (it cannot speak first).
+              session?.sendClientContent({
+                turns: [{ role: "user", parts: [{ text: `Say exactly: "${SAMPLE_LINE}"` }] }],
+                turnComplete: true,
+              });
+            },
+            onmessage: (msg: LiveServerMessage) => {
+              const b64 = msg.data;
+              if (b64) chunks.push(Buffer.from(b64, "base64"));
+              if (msg.serverContent?.turnComplete) {
+                clearTimeout(timer);
+                resolve();
+              }
+            },
+            onerror: (e: ErrorEvent) => {
+              clearTimeout(timer);
+              reject(new Error(e.message || "Live session error"));
+            },
+            onclose: () => {
+              clearTimeout(timer);
+              resolve();
+            },
+          },
+        })
+        .then((s) => {
+          session = s;
+        })
+        .catch(reject);
     });
+
+    await done;
+    (session as Session | null)?.close();
+
+    if (!chunks.length) return { error: "Live model returned no audio." };
+    return { pcm: Buffer.concat(chunks) };
   } catch (e) {
-    return { error: `Network error reaching Gemini: ${e instanceof Error ? e.message : e}` };
+    try { (session as Session | null)?.close(); } catch { /* ignore */ }
+    return { error: e instanceof Error ? e.message : "Live synthesis failed" };
   }
-
-  if (!res.ok) {
-    const detail = await res.text();
-    // Surface the upstream status + message so the cause is visible.
-    return { error: `Gemini TTS ${res.status}: ${detail.slice(0, 400)}` };
-  }
-
-  const data = (await res.json()) as {
-    candidates?: { content?: { parts?: { inlineData?: { data?: string } }[] } }[];
-  };
-  const b64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  if (!b64) return { error: "Gemini returned no audio data (check the model supports AUDIO output)." };
-  return { pcm: Buffer.from(b64, "base64") };
 }
 
 export async function GET(req: Request) {
@@ -97,20 +131,23 @@ export async function GET(req: Request) {
     return Response.json({ error: "GOOGLE_API_KEY not set" }, { status: 503 });
   }
 
-  const key = createHash("sha256").update(`${voice}|${SAMPLE_LINE}`).digest("hex").slice(0, 24);
+  // Cache key includes the model so switching models regenerates samples.
+  const key = createHash("sha256")
+    .update(`${LIVE_MODEL}|${voice}|${SAMPLE_LINE}`)
+    .digest("hex")
+    .slice(0, 24);
   const file = join(CACHE_DIR, `${key}.wav`);
 
-  // Serve from cache if present.
   try {
     const cached = await readFile(file);
     return new Response(new Uint8Array(cached), {
       headers: { "Content-Type": "audio/wav", "Cache-Control": "public, max-age=86400" },
     });
   } catch {
-    // miss — synthesize below
+    // miss — synthesize
   }
 
-  const result = await synthesize(voice);
+  const result = await synthesizeLive(voice);
   if (result.error || !result.pcm) {
     return Response.json({ error: result.error ?? "Synthesis failed" }, { status: 502 });
   }
@@ -120,7 +157,7 @@ export async function GET(req: Request) {
     await mkdir(CACHE_DIR, { recursive: true });
     await writeFile(file, wav);
   } catch {
-    // non-fatal; still serve this response
+    // non-fatal
   }
 
   return new Response(new Uint8Array(wav), {
