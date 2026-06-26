@@ -1,5 +1,7 @@
-import { getCalls, isConfigured } from "@/lib/data";
+import { getCallsFiltered, getCampaigns, isConfigured } from "@/lib/data";
 import { PageHeader, Card, Badge, ConfigBanner, EmptyState } from "@/components/ui";
+import { FilterBar } from "@/components/FilterBar";
+import Link from "next/link";
 import type { CallOutcome } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -20,16 +22,32 @@ function fmtDuration(sec: number | null) {
   return `${Math.floor(sec / 60)}m ${sec % 60}s`;
 }
 
-export default async function CallsPage() {
-  const calls = await getCalls(300);
+export default async function CallsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ from?: string; to?: string; campaignId?: string; code?: string }>;
+}) {
+  const sp = await searchParams;
+  const [calls, campaigns] = await Promise.all([
+    getCallsFiltered({
+      from: sp.from ?? null,
+      to: sp.to ?? null,
+      campaignId: sp.campaignId ?? null,
+      code: sp.code ?? null,
+      limit: 300,
+    }),
+    getCampaigns(),
+  ]);
 
   return (
     <div>
       <PageHeader title="Call Logs" subtitle="Every inbound call with outcome, step reached, and transcript." />
       {!isConfigured() && <ConfigBanner />}
 
+      <FilterBar campaigns={campaigns.map((c) => ({ id: c.id, name: c.name }))} />
+
       {calls.length === 0 ? (
-        <EmptyState title="No calls yet" body="Calls appear here once your Telnyx number routes to the agent." />
+        <EmptyState title="No calls match" body="Adjust the filters, or wait for calls to come in." />
       ) : (
         <Card className="p-0 overflow-hidden">
           <table className="w-full text-sm">
@@ -41,6 +59,7 @@ export default async function CallsPage() {
                 <th className="px-4 py-3 font-medium">Duration</th>
                 <th className="px-4 py-3 font-medium">Code</th>
                 <th className="px-4 py-3 font-medium">Test</th>
+                <th className="px-4 py-3 font-medium"></th>
               </tr>
             </thead>
             <tbody>
@@ -52,6 +71,11 @@ export default async function CallsPage() {
                   <td className="px-4 py-3 text-neutral-600">{fmtDuration(c.duration_seconds)}</td>
                   <td className="px-4 py-3 text-neutral-600">{c.discount_code ?? "—"}</td>
                   <td className="px-4 py-3">{c.is_test && <Badge tone="warn">test</Badge>}</td>
+                  <td className="px-4 py-3 text-right">
+                    <Link href={`/calls/${c.id}`} className="text-blue-600 hover:underline text-xs">
+                      View
+                    </Link>
+                  </td>
                 </tr>
               ))}
             </tbody>

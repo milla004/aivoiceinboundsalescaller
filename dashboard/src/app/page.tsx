@@ -1,19 +1,36 @@
-import { getCalls, getOrders, getCampaigns, isConfigured } from "@/lib/data";
+import { getCallsFiltered, getOrdersFiltered, getCampaigns, isConfigured } from "@/lib/data";
 import { computeKpis } from "@/lib/kpis";
 import { centsToUsd } from "@/lib/money";
 import { PageHeader, Stat, ConfigBanner, Card } from "@/components/ui";
+import { FilterBar } from "@/components/FilterBar";
 
 export const dynamic = "force-dynamic";
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ from?: string; to?: string; campaignId?: string; code?: string }>;
+}) {
+  const sp = await searchParams;
+  const filters = {
+    from: sp.from ?? null,
+    to: sp.to ?? null,
+    campaignId: sp.campaignId ?? null,
+    code: sp.code ?? null,
+  };
+
   const [calls, orders, campaigns] = await Promise.all([
-    getCalls(1000),
-    getOrders(2000),
+    getCallsFiltered({ ...filters, limit: 1000 }),
+    getOrdersFiltered({ ...filters, limit: 2000 }),
     getCampaigns(),
   ]);
 
-  const adCostCents = campaigns.reduce((s, c) => s + (c.ad_cost_cents ?? 0), 0);
-  const circulation = campaigns.reduce((s, c) => s + (c.circulation ?? 0), 0);
+  // Ad cost / circulation: scope to the selected campaign if filtering by one.
+  const scopedCampaigns = filters.campaignId
+    ? campaigns.filter((c) => c.id === filters.campaignId)
+    : campaigns;
+  const adCostCents = scopedCampaigns.reduce((s, c) => s + (c.ad_cost_cents ?? 0), 0);
+  const circulation = scopedCampaigns.reduce((s, c) => s + (c.circulation ?? 0), 0);
   const k = computeKpis({ calls, orders, adCostCents, circulation });
 
   // tone helpers per Caleb's benchmarks
@@ -31,6 +48,8 @@ export default async function DashboardPage() {
     <div>
       <PageHeader title="Dashboard" subtitle="Live KPIs — benchmarks from Caleb O'Dowd's call-center method" />
       {!isConfigured() && <ConfigBanner />}
+
+      <FilterBar campaigns={campaigns.map((c) => ({ id: c.id, name: c.name }))} />
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Stat label="Calls received" value={String(k.callsReceived)} />

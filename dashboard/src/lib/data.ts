@@ -30,6 +30,60 @@ export function getCalls(limit = 200): Promise<Call[]> {
   }, []);
 }
 
+export interface CallFilters {
+  /** ISO date (inclusive) lower bound on started_at. */
+  from?: string | null;
+  /** ISO date (inclusive) upper bound on started_at. */
+  to?: string | null;
+  campaignId?: string | null;
+  /** Filter by discount/tracking code (exact match). */
+  code?: string | null;
+  limit?: number;
+}
+
+/** Calls filtered by date range / campaign / code, newest first. */
+export function getCallsFiltered(filters: CallFilters = {}): Promise<Call[]> {
+  return safe(async () => {
+    let q = serviceClient().from('calls').select('*');
+    if (filters.from) q = q.gte('started_at', filters.from);
+    if (filters.to) {
+      // Make the upper bound inclusive of the whole day.
+      q = q.lte('started_at', `${filters.to}T23:59:59.999Z`);
+    }
+    if (filters.campaignId) q = q.eq('campaign_id', filters.campaignId);
+    if (filters.code) q = q.eq('discount_code', filters.code);
+    const { data, error } = await q
+      .order('started_at', { ascending: false })
+      .limit(filters.limit ?? 500);
+    if (error) throw error;
+    return (data ?? []) as Call[];
+  }, []);
+}
+
+/** Orders filtered by date range / campaign, newest first. */
+export function getOrdersFiltered(filters: CallFilters = {}): Promise<Order[]> {
+  return safe(async () => {
+    let q = serviceClient().from('orders').select('*');
+    if (filters.from) q = q.gte('created_at', filters.from);
+    if (filters.to) q = q.lte('created_at', `${filters.to}T23:59:59.999Z`);
+    if (filters.campaignId) q = q.eq('campaign_id', filters.campaignId);
+    const { data, error } = await q
+      .order('created_at', { ascending: false })
+      .limit(filters.limit ?? 2000);
+    if (error) throw error;
+    return (data ?? []) as Order[];
+  }, []);
+}
+
+export function getCall(id: string): Promise<Call | null> {
+  return safe(async () => {
+    const { data, error } = await serviceClient()
+      .from('calls').select('*').eq('id', id).single();
+    if (error) throw error;
+    return data as Call;
+  }, null);
+}
+
 export function getOrders(limit = 500): Promise<Order[]> {
   return safe(async () => {
     const { data, error } = await serviceClient()
