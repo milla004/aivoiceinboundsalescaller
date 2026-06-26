@@ -136,6 +136,32 @@ export async function updateCall(callId: string | null, patch: Record<string, un
   if (error) console.error('[db] updateCall failed', error);
 }
 
+/**
+ * Finalize a call at shutdown: write duration/transcript/ended_at, and set the
+ * outcome ONLY if it's still 'in_progress' (so a tool-set terminal outcome like
+ * 'sale' or 'transferred_human' is preserved).
+ */
+export async function finalizeCall(
+  callId: string | null,
+  patch: Record<string, unknown>,
+  fallbackOutcome: string,
+) {
+  const c = db();
+  if (!c || !callId) return;
+
+  // Apply the always-write fields first (duration, transcript, ended_at).
+  const { error: patchErr } = await c.from('calls').update(patch).eq('id', callId);
+  if (patchErr) console.error('[db] finalizeCall patch failed', patchErr);
+
+  // Conditionally set the outcome only if still in_progress.
+  const { error: outcomeErr } = await c
+    .from('calls')
+    .update({ outcome: fallbackOutcome })
+    .eq('id', callId)
+    .eq('outcome', 'in_progress');
+  if (outcomeErr) console.error('[db] finalizeCall outcome failed', outcomeErr);
+}
+
 /** Record an order (front-end or back-end). NEVER pass card data here. */
 export async function createOrder(opts: {
   contactId: string | null;

@@ -23,6 +23,7 @@ import { checkClaim } from './compliance.js';
 import { getPaymentProvider, isSandbox } from './payment.js';
 import { getGreetingAudio } from './greeting-audio.js';
 import { embedText } from './embeddings.js';
+import { startRecording, stopRecording } from './recording.js';
 import * as db from './db.js';
 
 // Map the dashboard's thinking-level string to the genai enum.
@@ -36,6 +37,7 @@ const THINKING_LEVELS: Record<string, ThinkingLevel> = {
 
 export default defineAgent({
   entry: async (ctx: JobContext) => {
+    const callStartedAt = Date.now();
     await ctx.connect();
     console.log('[agent] connected to room', ctx.room.name);
 
@@ -72,6 +74,12 @@ export default defineAgent({
       isTest,
     });
     if (callId && contactId) await db.linkCallContact(callId, contactId);
+
+    // -- Start call recording (audio) to S3/GCS, if configured ----------------
+    const recording = await startRecording(ctx.room.name ?? 'unknown', callId);
+    if (recording) {
+      await db.updateCall(callId, { recording_url: recording.filepath });
+    }
 
     const greeting =
       profile?.greeting ||
@@ -278,6 +286,10 @@ export default defineAgent({
       instructions: systemPrompt,
       // Gemini 3.1 live uses thinkingLevel (2.5 would use thinkingBudget).
       thinkingConfig: { thinkingLevel },
+      // Capture both sides of the conversation as text so we can save a
+      // transcript and read calls back in the dashboard.
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
       contextWindowCompression: {
         triggerTokens: '25600',
         slidingWindow: { targetTokens: '12800' },
@@ -300,17 +312,29 @@ export default defineAgent({
 
     const session = new voice.AgentSession({ llm: model });
 
-    // Guardrail: log any compliance violation in agent speech for auditing.
+    // Accumulate the transcript as the conversation happens, and flag any
+    // compliance violation in agent speech for auditing.
+    const transcript: Array<{ role: string; text: string; ts: string }> = [];
+    let callerSpoke = false;
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev: unknown) => {
       try {
         const item = ev as { item?: { role?: string; textContent?: string } };
-        if (item?.item?.role === 'assistant' && item.item.textContent) {
-          const check = checkClaim(item.item.textContent);
+        const role = item?.item?.role;
+        const text = item?.item?.textContent;
+        if (!role || !text) return;
+
+        // Record the turn (map model roles to caller/agent for the dashboard).
+        const mapped = role === 'user' ? 'caller' : role === 'assistant' ? 'agent' : 'system';
+        if (mapped === 'caller') callerSpoke = true;
+        transcript.push({ role: mapped, text, ts: new Date().toISOString() });
+
+        if (role === 'assistant') {
+          const check = checkClaim(text);
           if (!check.ok) {
             console.warn('[compliance] possible violation in agent speech:', check.violations);
             void db.emitEvent({
               contactId, callId, type: 'compliance_flag',
-              payload: { violations: check.violations, text: item.item.textContent.slice(0, 200) },
+              payload: { violations: check.violations, text: text.slice(0, 200) },
             });
           }
         }
@@ -342,8 +366,21 @@ export default defineAgent({
 
     // -- On shutdown, finalize the call row -----------------------------------
     ctx.addShutdownCallback(async () => {
-      await db.updateCall(callId, { ended_at: new Date().toISOString() });
-      console.log('[agent] call ended', callId);
+      const durationSeconds = Math.max(0, Math.round((Date.now() - callStartedAt) / 1000));
+
+      // Finalize the outcome if a tool didn't already set a terminal one
+      // (sale / transferred_human). A call where the caller never spoke is
+      // 'abandoned'; otherwise it ended without a sale.
+      const patch: Record<string, unknown> = {
+        ended_at: new Date().toISOString(),
+        duration_seconds: durationSeconds,
+        transcript,
+      };
+      const finalOutcome = !callerSpoke ? 'abandoned' : 'no_sale';
+      // updateCall only writes provided fields; a prior 'sale'/'transferred_human'
+      // is preserved because we only set outcome when it's still in_progress.
+      await db.finalizeCall(callId, patch, finalOutcome);
+      console.log(`[agent] call ended ${callId} (${durationSeconds}s, ${transcript.length} turns)`);
     });
   },
 });

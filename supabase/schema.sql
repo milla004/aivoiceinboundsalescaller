@@ -289,9 +289,11 @@ create table if not exists knowledge_documents (
 );
 create index if not exists knowledge_profile_idx on knowledge_documents (agent_profile_id);
 create index if not exists knowledge_source_idx on knowledge_documents (source_id);
--- IVFFlat cosine index for fast approximate nearest-neighbour search.
+-- HNSW cosine index for fast, high-recall approximate nearest-neighbour search.
+-- HNSW gives lower query latency and better recall than ivfflat for our scale,
+-- at the cost of slower index builds (irrelevant for a small knowledge base).
 create index if not exists knowledge_embedding_idx
-  on knowledge_documents using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+  on knowledge_documents using hnsw (embedding vector_cosine_ops);
 
 -- Retrieve the top-k most similar knowledge chunks for a profile.
 -- Returns similarity in [0,1] (1 = identical direction). The agent passes a
