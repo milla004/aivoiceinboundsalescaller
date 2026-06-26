@@ -106,20 +106,8 @@ export function AgentEditor({ profiles }: { profiles: AgentProfile[] }) {
             />
           </Field>
 
-          <Field label="Voice" hint="Gemini Live voice — the greeting is also synthesized in this voice">
-            <div className="flex flex-wrap gap-2">
-              {GEMINI_VOICES.map((v) => (
-                <button
-                  key={v}
-                  onClick={() => update("voice", v)}
-                  className={`rounded-full px-3 py-1 text-sm border ${
-                    draft.voice === v ? "border-blue-500 bg-blue-50 text-blue-700" : "border-neutral-200 text-neutral-600 hover:bg-neutral-50"
-                  }`}
-                >
-                  {v}
-                </button>
-              ))}
-            </div>
+          <Field label="Voice" hint="Gemini Live voice — the greeting is also synthesized in this voice. Tap ▶ to preview.">
+            <VoicePicker selected={draft.voice} onSelect={(v) => update("voice", v)} />
           </Field>
 
           <Field label="Thinking level" hint="How much the model reasons before replying. Higher = smarter but slower to respond.">
@@ -228,6 +216,68 @@ function FaqEditor({ faq, onChange }: { faq: FaqItem[]; onChange: (f: FaqItem[])
       >
         + Add FAQ
       </button>
+    </div>
+  );
+}
+
+function VoicePicker({
+  selected,
+  onSelect,
+}: {
+  selected: string;
+  onSelect: (v: string) => void;
+}) {
+  // Which voice is currently loading/playing a preview.
+  const [playing, setPlaying] = useState<string | null>(null);
+  const [audio, setAudio] = useState<HTMLAudioElement | null>(null);
+
+  async function preview(v: string) {
+    // Stop anything already playing.
+    if (audio) {
+      audio.pause();
+      setAudio(null);
+    }
+    setPlaying(v);
+    try {
+      const el = new Audio(`/api/voice-sample?voice=${encodeURIComponent(v)}`);
+      el.onended = () => setPlaying(null);
+      el.onerror = () => setPlaying(null);
+      setAudio(el);
+      await el.play();
+    } catch {
+      setPlaying(null);
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      {GEMINI_VOICES.map((v) => {
+        const isSelected = selected === v;
+        return (
+          <span
+            key={v}
+            className={`inline-flex items-center rounded-full border text-sm overflow-hidden ${
+              isSelected ? "border-blue-500 bg-blue-50" : "border-neutral-200 hover:bg-neutral-50"
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => preview(v)}
+              title={`Preview ${v}`}
+              className={`pl-2.5 pr-1 py-1 ${isSelected ? "text-blue-700" : "text-neutral-400 hover:text-neutral-700"}`}
+            >
+              {playing === v ? "♪" : "▶"}
+            </button>
+            <button
+              type="button"
+              onClick={() => onSelect(v)}
+              className={`pr-3 pl-1 py-1 ${isSelected ? "text-blue-700 font-medium" : "text-neutral-600"}`}
+            >
+              {v}
+            </button>
+          </span>
+        );
+      })}
     </div>
   );
 }
