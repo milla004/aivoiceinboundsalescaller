@@ -312,6 +312,37 @@ export default defineAgent({
 
     const session = new voice.AgentSession({ llm: model });
 
+    // -- Per-turn latency logging ---------------------------------------------
+    // Measure the gap between the caller finishing speaking and the agent
+    // starting to speak — this is the "dead air" the caller experiences, and
+    // the number most affected by the thinking level. Logged per turn plus a
+    // running average so different thinking levels can be compared from logs.
+    let lastUserStoppedAt: number | null = null;
+    let latencyCount = 0;
+    let latencyTotalMs = 0;
+    session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev: unknown) => {
+      // Caller transitioned to 'listening' = they just stopped speaking.
+      const e = ev as { newState?: string };
+      if (e?.newState === 'listening') lastUserStoppedAt = Date.now();
+    });
+    session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev: unknown) => {
+      const e = ev as { newState?: string };
+      if (e?.newState === 'speaking' && lastUserStoppedAt !== null) {
+        const ms = Date.now() - lastUserStoppedAt;
+        lastUserStoppedAt = null;
+        // Ignore implausible gaps (e.g. the opening greeting before any caller turn).
+        if (ms >= 0 && ms < 60000) {
+          latencyCount += 1;
+          latencyTotalMs += ms;
+          const avg = Math.round(latencyTotalMs / latencyCount);
+          console.log(
+            `[latency] response ${ms}ms (turn ${latencyCount}, avg ${avg}ms, ` +
+            `thinking=${(profile?.thinking_level as string) ?? 'low'}, voice=${voiceName})`,
+          );
+        }
+      }
+    });
+
     // Accumulate the transcript as the conversation happens, and flag any
     // compliance violation in agent speech for auditing.
     const transcript: Array<{ role: string; text: string; ts: string }> = [];
@@ -366,6 +397,9 @@ export default defineAgent({
 
     // -- On shutdown, finalize the call row -----------------------------------
     ctx.addShutdownCallback(async () => {
+      // Stop the egress recording if one was started.
+      if (recording) await stopRecording(recording.egressId);
+
       const durationSeconds = Math.max(0, Math.round((Date.now() - callStartedAt) / 1000));
 
       // Finalize the outcome if a tool didn't already set a terminal one
